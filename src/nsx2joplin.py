@@ -12,6 +12,7 @@ import time
 import zipfile
 from pathlib import Path
 from typing import Dict, List, Any
+import trio
 
 from joplin_api import JoplinApi
 
@@ -38,7 +39,6 @@ class nsx2joplin:
         -------
         None
         """
-
         def check_pandoc():
             pandoc_input_file = tempfile.NamedTemporaryFile(delete=False)
             pandoc_output_file = tempfile.NamedTemporaryFile(delete=False)
@@ -232,8 +232,8 @@ class nsx2joplin:
             print(f"Reading note {idx}/{num_notes}: {note_title}")
 
             content = re.sub(
-                "< img class=[ ^ >]*syno-notestation-image-object[^>]*"
-                "src=[ ^ >]*ref=",
+                "<img class=[^>]*syno-notestation-image-object[^>]*"
+                "src=[^>]*ref=",
                 "<img src=",
                 note_data.get("content", ""),
             )
@@ -339,7 +339,7 @@ class nsx2joplin:
         async def create_resource(attachments, content, attachment_path):
             for index, attachment in enumerate(attachments, start=0):
 
-                attachment_type = attachment["type"]
+                attachment_type = attachment["type"].split("/")[0]
                 name = attachment["name"]
 
                 res = await joplin.create_resource(
@@ -379,7 +379,7 @@ class nsx2joplin:
             assert res.status_code == 200
 
         for notebook in nsx_content["notebooks"]:
-            joplin_id = asyncio.run(create_folder(notebook["title"]))
+            joplin_id = trio.run(create_folder,notebook["title"])
 
             # filter notes that belong to current notebook
             filtered_notes = [
@@ -391,46 +391,51 @@ class nsx2joplin:
 
             for idx, note in enumerate(filtered_notes, start=1):
 
-                print(
-                    f"Writing note {idx}/{num_filtered_notes} in {notebook['title']}: "
-                    f"{note['title']}"
-                )
+                try:
+                    print(
+                        f"Writing note {idx}/{num_filtered_notes} in {notebook['title']}: "
+                        f"{note['title']}"
+                    )
 
-                # transform list of tags to string
-                tag = None
-                if note["tag"]:
-                    tag = ",".join(note["tag"])
+                    # transform list of tags to string
+                    tag = None
+                    if note["tag"]:
+                        tag = ",".join(note["tag"])
 
-                # Create resource, if necessary
-                if note["attachment"]:
-                    note["content"] = asyncio.run(
-                        create_resource(
-                            attachments=note["attachment"],
-                            content=note["content"],
-                            attachment_path=notebook["media_path"],
+                    # Create resource, if necessary
+                    if note["attachment"]:
+                        note["content"] = trio.run(
+                            create_resource,
+                                note["attachment"],
+                                note["content"],
+                                notebook["media_path"],
+                            
                         )
-                    )
 
-                asyncio.run(
-                    create_note(
-                        joplin_id=joplin_id,
-                        note_title=note["title"],
-                        note_content=note["content"],
-                        note_tags=tag,
-                        user_created_time=note["ctime"] * 1000,
-                        user_updated_time=note["mtime"] * 1000,
+                    trio.run(
+                        create_note,
+                            joplin_id,
+                            note["title"],
+                            note["content"],
+                            tag,
+                            note["ctime"] * 1000,
+                            note["mtime"] * 1000,
+                        
                     )
-                )
+                except Exception as e:
+                    print(
+                        f"import failed:{note['title']}"
+                    )
 
                 if idx % 1000 == 0:
-                    seconds = 300
+                    seconds = 30
                     print(
                         f"Sleep for {seconds} seconds in order to not crash Joplin web "
                         "clipper"
                     )
                     time.sleep(seconds)
                 elif idx % 500 == 0:
-                    seconds = 120
+                    seconds = 12
                     print(
                         f"Sleep for {seconds} seconds in order to not crash Joplin web "
                         "clipper"
@@ -439,6 +444,7 @@ class nsx2joplin:
 
 
 if __name__ == "__main__":
+
     # intantiate nsx2joplin object
     nsx = nsx2joplin()
 
@@ -448,7 +454,7 @@ if __name__ == "__main__":
     nsx_file = p.joinpath("notestation-test-books.nsx")
 
     # possibility to load a previously saved .pickle file
-    load_nsx_content = False
+    load_nsx_content = True
 
     if load_nsx_content:
         pickle_file = "nsx_content.pickle"
@@ -456,7 +462,7 @@ if __name__ == "__main__":
             nsx_content = pickle.load(input_file)
         print("Loaded nsx_content from nsx_content.pickle")
     else:
-        nsx_content = nsx.extract_data_from_nsx(nsx_file=nsx_file, save_pickle=False)
+        nsx_content = nsx.extract_data_from_nsx(nsx_file=nsx_file, save_pickle=True)
 
     # step 2: write notes to Joplin notes app
     joplin_token = ""  # noqa
